@@ -1,13 +1,15 @@
 """
-Score each occupation's AI exposure using an LLM via OpenRouter.
+Score each occupation's AI exposure using Google Gemini via Google AI Studio.
 
-Reads Markdown descriptions from pages/, sends each to an LLM with a scoring
+Reads Markdown descriptions from pages/, sends each to Gemini with a scoring
 rubric, and collects structured scores. Results are cached incrementally to
 scores.json so the script can be resumed if interrupted.
 
+Requires GEMINI_API_KEY in .env (get one at https://aistudio.google.com/apikey)
+
 Usage:
     uv run python score.py
-    uv run python score.py --model google/gemini-3-flash-preview
+    uv run python score.py --model gemini-3-flash-preview
     uv run python score.py --start 0 --end 10   # test on first 10
 """
 
@@ -15,14 +17,13 @@ import argparse
 import json
 import os
 import time
-import httpx
 from dotenv import load_dotenv
+from google import genai
 
 load_dotenv()
 
-DEFAULT_MODEL = "google/gemini-3-flash-preview"
+DEFAULT_MODEL = "gemini-3-flash-preview"
 OUTPUT_FILE = "scores.json"
-API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 SYSTEM_PROMPT = """\
 You are an expert analyst evaluating how exposed different occupations are to \
@@ -86,27 +87,18 @@ Respond with ONLY a JSON object in this exact format, no other text:
 
 
 def score_occupation(client, text, model):
-    """Send one occupation to the LLM and parse the structured response."""
-    response = client.post(
-        API_URL,
-        headers={
-            "Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}",
-        },
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
+    """Send one occupation to Gemini and parse the structured response."""
+    response = client.models.generate_content(
+        model=model,
+        contents=text,
+        config={
+            "system_instruction": SYSTEM_PROMPT,
             "temperature": 0.2,
         },
-        timeout=60,
     )
-    response.raise_for_status()
-    content = response.json()["choices"][0]["message"]["content"]
+    content = response.text.strip()
 
     # Strip markdown code fences if present
-    content = content.strip()
     if content.startswith("```"):
         content = content.split("\n", 1)[1]  # remove first line
         if content.endswith("```"):
@@ -126,6 +118,16 @@ def main():
                         help="Re-score even if already cached")
     args = parser.parse_args()
 
+    # Initialize Gemini client
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("ERROR: GEMINI_API_KEY not found in environment.")
+        print("Get one at: https://aistudio.google.com/apikey")
+        print("Add it to .env: GEMINI_API_KEY=your-key-here")
+        return
+
+    client = genai.Client(api_key=api_key)
+
     with open("occupations.json") as f:
         occupations = json.load(f)
 
@@ -142,7 +144,6 @@ def main():
     print(f"Already cached: {len(scores)}")
 
     errors = []
-    client = httpx.Client()
 
     for i, occ in enumerate(subset):
         slug = occ["slug"]
@@ -178,8 +179,6 @@ def main():
 
         if i < len(subset) - 1:
             time.sleep(args.delay)
-
-    client.close()
 
     print(f"\nDone. Scored {len(scores)} occupations, {len(errors)} errors.")
     if errors:
